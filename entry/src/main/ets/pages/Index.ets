@@ -20,12 +20,20 @@ interface ErrorEvent {
   error: WebResourceError;
 }
 
+interface TabInfo {
+  url: string;
+  title: string;
+}
+
 const HOME_URL: string = 'resource://rawfile/home.html';
+const MAX_TABS: number = 3;
 
 @Entry
 @Component
 struct Index {
   private controller: webview.WebviewController = new webview.WebviewController();
+  @State tabs: TabInfo[] = [{ url: '', title: '主页' }];
+  @State active: number = 0;
   @State address: string = '';
   @State title: string = '浏览器';
   @State status: string = '就绪';
@@ -36,6 +44,9 @@ struct Index {
   @State canForward: boolean = false;
   private pageStart: number = 0;
   private pendingUrl: string = '';
+  private prefs: preferences.Preferences | null = null;
+  @State webNonce: number = 0;
+  @State webSrc: string = '';
 
   aboutToAppear(): void {
     const su: string | undefined = AppStorage.get<string>('startUrl');
@@ -43,33 +54,135 @@ struct Index {
       this.pendingUrl = su;
       this.address = su;
     }
-    this.loadPrefs();
+    this.loadSession();
   }
 
-  private async loadPrefs(): Promise<void> {
+  private async loadSession(): Promise<void> {
     try {
       const ctx = getContext(this) as common.UIAbilityContext;
-      const p = await preferences.getPreferences(ctx, 'browser');
-      const last = await p.get('lastUrl', '') as string;
-      if (last.indexOf('http://') === 0 || last.indexOf('https://') === 0) {
-        this.address = last;
-        Log.info('lastUrl ' + last);
+      this.prefs = await preferences.getPreferences(ctx, 'browser');
+      const raw = await this.prefs.get('tabs', '') as string;
+      if (raw.length > 2) {
+        const arr = JSON.parse(raw) as TabInfo[];
+        if (arr.length > 0) {
+          this.tabs = arr.slice(0, MAX_TABS);
+        }
+      }
+      const a = await this.prefs.get('active', 0) as number;
+      this.active = a >= 0 && a < this.tabs.length ? a : 0;
+      const t = this.tabs[this.active];
+      this.title = t.title;
+      this.address = t.url;
+      if (this.pendingUrl.length === 0 && t.url.length > 0) {
+        this.pendingUrl = t.url;
+      }
+      Log.info('session restored ' + this.tabs.length + ' tabs');
+    } catch (e) {
+      Log.warn('session load failed');
+    }
+  }
+
+  private saveSession(): void {
+    if (this.prefs === null) {
+      return;
+    }
+    try {
+      this.prefs.put('tabs', JSON.stringify(this.tabs));
+      this.prefs.put('active', this.active);
+      this.prefs.flush();
+    } catch (e) {
+      Log.warn('session save failed');
+    }
+  }
+
+  private touch(): void {
+    this.tabs = this.tabs.slice(0, this.tabs.length);
+  }
+
+  private activeTabUrl(): string {
+    if (this.active < 0 || this.active >= this.tabs.length) {
+      return '';
+    }
+    return this.tabs[this.active].url;
+  }
+
+  private resetWeb(url: string): void {
+    this.pendingUrl = '';
+    this.webSrc = url;
+    this.controller = new webview.WebviewController();
+    this.webNonce++;
+  }
+
+  private load(url: string): void {
+    this.errText = '';
+    try {
+      if (url.length > 0) {
+        this.controller.loadUrl(url);
+      } else {
+        this.controller.loadUrl(HOME_URL);
       }
     } catch (e) {
-      Log.warn('prefs load failed');
+      this.status = '打开失败';
     }
   }
 
-  private saveUrl(url: string): void {
-    try {
-      const ctx = getContext(this) as common.UIAbilityContext;
-      preferences.getPreferences(ctx, 'browser').then((p: preferences.Preferences) => {
-        p.put('lastUrl', url);
-        p.flush();
-      });
-    } catch (e) {
-      Log.warn('prefs save failed');
+  private persistCurrent(): void {
+    if (this.active < 0 || this.active >= this.tabs.length) {
+      return;
     }
+    if (this.address.indexOf('http') === 0) {
+      this.tabs[this.active].url = this.address;
+    }
+    this.tabs[this.active].title = this.title;
+    this.touch();
+  }
+
+  private switchTab(i: number): void {
+    if (i === this.active || i < 0 || i >= this.tabs.length) {
+      return;
+    }
+    this.persistCurrent();
+    this.active = i;
+    const t = this.tabs[i];
+    this.address = t.url;
+    this.title = t.title;
+    this.resetWeb(t.url);
+    this.saveSession();
+  }
+
+  private newTab(): void {
+    if (this.tabs.length >= MAX_TABS) {
+      this.status = '最多 3 个标签';
+      return;
+    }
+    this.persistCurrent();
+    this.tabs.push({ url: '', title: '新标签' });
+    this.active = this.tabs.length - 1;
+    this.address = '';
+    this.title = '新标签';
+    this.resetWeb('');
+    this.saveSession();
+  }
+
+  private closeTab(): void {
+    if (this.tabs.length <= 1) {
+      this.tabs = [{ url: '', title: '主页' }];
+      this.active = 0;
+      this.address = '';
+      this.title = '主页';
+      this.resetWeb('');
+      this.saveSession();
+      return;
+    }
+    this.tabs.splice(this.active, 1);
+    if (this.active >= this.tabs.length) {
+      this.active = this.tabs.length - 1;
+    }
+    const t = this.tabs[this.active];
+    this.address = t.url;
+    this.title = t.title;
+    this.resetWeb(t.url);
+    this.saveSession();
   }
 
   private normalize(input: string): string {
@@ -99,22 +212,19 @@ struct Index {
       return;
     }
     this.address = url;
-    this.errText = '';
-    try {
-      this.controller.loadUrl(url);
-    } catch (e) {
-      this.status = '打开失败';
-    }
+    this.load(url);
   }
 
   private goHome(): void {
-    this.errText = '';
     this.address = '';
-    try {
-      this.controller.loadUrl(HOME_URL);
-    } catch (e) {
-      Log.warn('load home failed');
+    this.title = '主页';
+    if (this.active >= 0 && this.active < this.tabs.length) {
+      this.tabs[this.active].url = '';
+      this.tabs[this.active].title = '主页';
+      this.touch();
+      this.saveSession();
     }
+    this.load('');
   }
 
   private updateNav(): void {
@@ -124,18 +234,6 @@ struct Index {
     } catch (e) {
       this.canBack = false;
       this.canForward = false;
-    }
-  }
-
-  private goBack(): void {
-    if (this.canBack) {
-      this.controller.backward();
-    }
-  }
-
-  private goForward(): void {
-    if (this.canForward) {
-      this.controller.forward();
     }
   }
 
@@ -155,6 +253,46 @@ struct Index {
 
   build() {
     Column({ space: 8 }) {
+      Row({ space: 6 }) {
+        ForEach(this.tabs, (t: TabInfo, i: number) => {
+          Row({ space: 4 }) {
+            Text(t.title.length > 0 ? t.title : '新标签')
+              .fontSize(10)
+              .fontColor(i === this.active ? '#E8F0FB' : '#8295AD')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+          }
+          .layoutWeight(1)
+          .height(30)
+          .padding({ left: 8, right: 8 })
+          .backgroundColor(i === this.active ? '#1E2B40' : '#111720')
+          .borderRadius(8)
+          .onClick(() => {
+            this.switchTab(i);
+          })
+        }, (t: TabInfo, i: number) => i.toString() + t.url + t.title)
+        Button('+')
+          .height(30)
+          .width(42)
+          .fontSize(16)
+          .backgroundColor('#151D29')
+          .fontColor('#DCE7F7')
+          .onClick(() => {
+            this.newTab();
+          })
+        Button('关')
+          .height(30)
+          .width(46)
+          .fontSize(11)
+          .backgroundColor('#151D29')
+          .fontColor('#DCE7F7')
+          .onClick(() => {
+            this.closeTab();
+          })
+      }
+      .width('100%')
+
       Row({ space: 8 }) {
         TextInput({ text: this.address, placeholder: '输入网址或搜索' })
           .height(40)
@@ -189,7 +327,9 @@ struct Index {
           .fontColor(this.canBack ? '#DCE7F7' : '#4A586B')
           .enabled(this.canBack)
           .onClick(() => {
-            this.goBack();
+            if (this.canBack) {
+              this.controller.backward();
+            }
           })
         Button('→')
           .height(34)
@@ -199,7 +339,9 @@ struct Index {
           .fontColor(this.canForward ? '#DCE7F7' : '#4A586B')
           .enabled(this.canForward)
           .onClick(() => {
-            this.goForward();
+            if (this.canForward) {
+              this.controller.forward();
+            }
           })
         Button(this.loading ? '停止' : '刷新')
           .height(34)
@@ -244,80 +386,96 @@ struct Index {
       }
 
       Stack({ alignContent: Alignment.Center }) {
-        Web({ src: $rawfile('home.html'), controller: this.controller })
-          .width('100%')
-          .height('100%')
-          .backgroundColor('#0B0F16')
-          .domStorageAccess(true)
-          .fileAccess(false)
-          .darkMode(WebDarkMode.Off)
-          .forceDarkAccess(false)
-          .onControllerAttached(() => {
-            try {
-              this.controller.setCustomUserAgent(
-                'Mozilla/5.0 (Phone; OpenHarmony 4.1) AppleWebKit/537.36 (KHTML, like Gecko) HomeBrowser/0.1');
-
-            } catch (e) {
-            }
-          })
-          .onPageBegin((event?: PageEvent) => {
-            this.pageStart = Date.now();
-            this.loading = true;
-            this.status = '加载中…';
-            this.progress = 0;
-            this.errText = '';
-          })
-          .onPageEnd((event?: PageEvent) => {
-            const ms = this.pageStart > 0 ? (Date.now() - this.pageStart) : 0;
-            this.loading = false;
-            this.status = '完成 ' + ms + 'ms';
-            if (event !== undefined && event.url.length > 0) {
-              if (event.url.indexOf('resource://') !== 0) {
-                this.address = event.url;
-                this.saveUrl(event.url);
-              } else {
-                this.address = '';
-                if (this.pendingUrl.length > 0) {
-                  const u = this.pendingUrl;
-                  this.pendingUrl = '';
-                  this.controller.loadUrl(u);
+        ForEach([this.active], (i: number) => {
+          Web({ src: this.webSrc.length > 0 ? this.webSrc : $rawfile('home.html'), controller: this.controller })
+            .width('100%')
+            .height('100%')
+            .backgroundColor('#FFFFFF')
+            .domStorageAccess(true)
+            .fileAccess(false)
+            .darkMode(WebDarkMode.Off)
+            .forceDarkAccess(false)
+            .onControllerAttached(() => {
+              try {
+                this.controller.setCustomUserAgent(
+                  'Mozilla/5.0 (Phone; OpenHarmony 4.1) AppleWebKit/537.36 (KHTML, like Gecko) HomeBrowser/0.1');
+              } catch (e) {
+              }
+            })
+            .onPageBegin((event?: PageEvent) => {
+              this.pageStart = Date.now();
+              this.loading = true;
+              this.status = '加载中…';
+              this.progress = 0;
+              this.errText = '';
+            })
+            .onPageEnd((event?: PageEvent) => {
+              const ms = this.pageStart > 0 ? (Date.now() - this.pageStart) : 0;
+              this.loading = false;
+              this.status = '完成 ' + ms + 'ms';
+              if (event !== undefined && event.url.length > 0) {
+                if (event.url.indexOf('resource://') !== 0) {
+                  this.address = event.url;
+                  if (this.active >= 0 && this.active < this.tabs.length) {
+                    this.tabs[this.active].url = event.url;
+                  }
+                } else {
+                  this.address = '';
+                  if (this.active >= 0 && this.active < this.tabs.length) {
+                    this.tabs[this.active].url = '';
+                  }
+                  if (this.pendingUrl.length > 0) {
+                    const u = this.pendingUrl;
+                    this.pendingUrl = '';
+                    this.controller.loadUrl(u);
+                  }
                 }
               }
-            }
-            this.title = this.controller.getTitle();
-            this.updateNav();
-            Log.info('pageEnd ' + ms + 'ms');
-          })
-          .onProgressChange((event?: ProgressEvent) => {
-            this.progress = event !== undefined ? event.newProgress : 0;
-            if (this.progress >= 100) {
-              this.loading = false;
-            }
-            this.updateNav();
-          })
-          .onTitleReceive((event?: TitleEvent) => {
-            if (event !== undefined && event.title.length > 0) {
-              this.title = event.title;
-            }
-          })
-          .onErrorReceive((event?: ErrorEvent) => {
-            if (event === undefined) {
-              return;
-            }
-            try {
-              if (!event.request.isMainFrame()) {
+              this.title = this.controller.getTitle();
+              if (this.active >= 0 && this.active < this.tabs.length) {
+                this.tabs[this.active].title = this.title;
+              }
+              this.touch();
+              this.saveSession();
+              this.updateNav();
+              Log.info('pageEnd ' + ms + 'ms');
+            })
+            .onProgressChange((event?: ProgressEvent) => {
+              this.progress = event !== undefined ? event.newProgress : 0;
+              if (this.progress >= 100) {
+                this.loading = false;
+              }
+              this.updateNav();
+            })
+            .onTitleReceive((event?: TitleEvent) => {
+              if (event !== undefined && event.title.length > 0) {
+                this.title = event.title;
+                if (this.active >= 0 && this.active < this.tabs.length) {
+                  this.tabs[this.active].title = event.title;
+                  this.touch();
+                }
+              }
+            })
+            .onErrorReceive((event?: ErrorEvent) => {
+              if (event === undefined) {
                 return;
               }
-              const code = event.error.getErrorCode();
-              const info = event.error.getErrorInfo();
-              this.errText = '错误 ' + code + '：' + info;
-              this.loading = false;
-              this.status = '加载失败';
-              Log.warn('page error ' + code + ' ' + info);
-            } catch (e) {
-              this.errText = '页面加载失败';
-            }
-          })
+              try {
+                if (!event.request.isMainFrame()) {
+                  return;
+                }
+                const code = event.error.getErrorCode();
+                const info = event.error.getErrorInfo();
+                this.errText = '错误 ' + code + '：' + info;
+                this.loading = false;
+                this.status = '加载失败';
+                Log.warn('page error ' + code + ' ' + info);
+              } catch (e) {
+                this.errText = '页面加载失败';
+              }
+            })
+
+        }, (i: number) => i.toString() + '_' + this.webNonce)
 
         if (this.errText.length > 0) {
           Column({ space: 12 }) {
