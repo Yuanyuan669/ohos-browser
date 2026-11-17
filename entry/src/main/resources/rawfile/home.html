@@ -1,0 +1,23 @@
+﻿<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>浏览器 M0</title>
+<style>
+body{margin:0;padding:28px 20px;background:#0b0f16;color:#e8f0fb;font-family:sans-serif}
+h1{font-size:24px}
+#ua{background:#151d29;padding:12px;border-radius:10px;color:#9fb2cc;font-size:12px;word-break:break-all;margin:18px 0}
+a{display:block;padding:14px 16px;margin:10px 0;background:#1a2331;color:#8fb8ff;text-align:center;border-radius:10px;text-decoration:none}
+</style>
+</head>
+<body>
+<h1>HomeBrowser M0</h1>
+<p>本地主页已加载，Web 组件可用。</p>
+<div id="ua"></div>
+<a href="https://example.com">打开 https://example.com</a>
+<a href="https://www.bing.com">打开 https://www.bing.com</a>
+<a href="test.html">本地白底测试</a>
+<script>document.getElementById("ua").textContent = "UA: " + navigator.userAgent;</script>
+</body>
+</html>

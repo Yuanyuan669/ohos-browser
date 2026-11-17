@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Home browser"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Home browser"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "浏览器"
+    }
+  ]
+}
