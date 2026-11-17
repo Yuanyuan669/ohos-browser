@@ -66,3 +66,13 @@
 
 - M2 完成（RSS 一项受引擎限制）。
 - 下一步 M3：书签/历史（preferences）。
+
+
+## M4 预研：下载可行性（2026-11-17）
+
+- **API 11 WebDownloadDelegate（推荐）**：`controller.setDownloadDelegate(delegate)`，`WebDownloadItem` 提供
+  `getPercentComplete/getReceivedBytes/getTotalBytes/getState/pause/resume/cancel/getFullPath`；能复用 Web 的 cookie/UA。
+  本项目 compileSdk=10，需升 11（会触发 9568282，需卸载重装）。
+- **API 10 备选**：`Web.onDownloadStart` 取 url/userAgent/contentDisposition/mimetype/contentLength，交给
+  `@ohos.request.downloadFile`（需 INTERNET，已有）。缺点：不带 Web 会话 cookie、无暂停/续传 UI 集成。
+- 待确认：下载目录（delegate 默认路径 + `getFullPath` 导出）、`blob:/data:` 链接不支持、断点续传服务器要求。
