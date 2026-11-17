@@ -7,6 +7,14 @@ import { Log } from '../common/Logger';
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     Log.info('browser onCreate');
+    const params = want.parameters;
+    if (params !== undefined) {
+      const v = params['url'];
+      if (typeof v === 'string' && v.length > 0) {
+        AppStorage.setOrCreate('startUrl', v as string);
+        Log.info('startUrl ' + (v as string));
+      }
+    }
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
