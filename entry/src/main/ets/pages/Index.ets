@@ -152,16 +152,20 @@ struct Index {
     return out;
   }
 
-  private saveLinks(key: string, items: LinkItem[]): void {
+  private savePref(key: string, value: string | number | boolean): void {
     if (this.prefs === null) {
       return;
     }
-    try {
-      this.prefs.put(key, JSON.stringify(items));
-      this.prefs.flush();
-    } catch (e) {
-      Log.warn('links save failed ' + key);
-    }
+    this.prefs.put(key, value).catch((e: Error) => {
+      Log.warn('pref put failed ' + key + ' ' + e.message);
+    });
+    this.prefs.flush().catch((e: Error) => {
+      Log.warn('pref flush failed ' + key + ' ' + e.message);
+    });
+  }
+
+  private saveLinks(key: string, items: LinkItem[]): void {
+    this.savePref(key, JSON.stringify(items));
   }
 
   private applyUserAgent(): void {
@@ -174,14 +178,7 @@ struct Index {
 
   private toggleUa(): void {
     this.uaMode = this.uaMode === 'desktop' ? 'mobile' : 'desktop';
-    if (this.prefs !== null) {
-      try {
-        this.prefs.put('uaMode', this.uaMode);
-        this.prefs.flush();
-      } catch (e) {
-        Log.warn('ua save failed');
-      }
-    }
+    this.savePref('uaMode', this.uaMode);
     this.applyUserAgent();
     const url = this.currentHttpUrl();
     this.load(url);
@@ -191,14 +188,7 @@ struct Index {
 
   private setShowDebug(on: boolean): void {
     this.showDebug = on;
-    if (this.prefs !== null) {
-      try {
-        this.prefs.put('showDebug', on);
-        this.prefs.flush();
-      } catch (e) {
-        Log.warn('debug save failed');
-      }
-    }
+    this.savePref('showDebug', on);
   }
 
   private initDownloadDelegate(): void {
@@ -535,16 +525,8 @@ struct Index {
   }
 
   private saveSession(): void {
-    if (this.prefs === null) {
-      return;
-    }
-    try {
-      this.prefs.put('tabs', JSON.stringify(this.tabs));
-      this.prefs.put('active', this.active);
-      this.prefs.flush();
-    } catch (e) {
-      Log.warn('session save failed');
-    }
+    this.savePref('tabs', JSON.stringify(this.tabs));
+    this.savePref('active', this.active);
   }
 
   private currentHttpUrl(): string {

@@ -116,7 +116,8 @@
   - 16MB 文件：进度递增，完成后落到 `files/downloads/m4-test.bin`；源文件与下载文件 SHA256 均为 `080ACF35...9643E`。
   - 128MB 文件：下载到 1% 暂停（已暂停 · 1%），点继续后继续增长；取消后显示“已取消/重试”。
   - 面板三页签与按钮在 1080x2408 实机布局正常。
-- 构建：unsigned 1,165,128 bytes；signed 1,170,679 bytes。
+  - 重装恢复 prefs 后曾出现“历史重启丢失”：只 chown 了文件，`haps/entry/preferences` 目录仍是 root，preferences flush 写临时文件失败且未处理 Promise；`chown -R` 目录后实测 4 条历史重启保留，并把保存封装为 `savePref` 记录 put/flush 失败。
+- 构建：unsigned 1,165,135 bytes；signed 1,170,679 bytes。
 - 限制：下载记录只在内存，重启后记录清空但文件保留；未做公共 Downloads 导出和断点续传持久化；`打开` 使用 `ohos.want.action.viewData`，无对应查看器时只提示失败。
 
 ## M4 预研：下载可行性（2026-11-17）
