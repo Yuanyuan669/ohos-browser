@@ -1,6 +1,9 @@
 import webview from '@ohos.web.webview';
 import preferences from '@ohos.data.preferences';
 import common from '@ohos.app.ability.common';
+import fs from '@ohos.file.fs';
+import fileUri from '@ohos.file.fileuri';
+import Want from '@ohos.app.ability.Want';
 import { Log } from '../common/Logger';
 
 interface PageEvent {
@@ -29,6 +32,19 @@ interface LinkItem {
   url: string;
   title: string;
   time: number;
+}
+
+interface DownloadRow {
+  guid: string;
+  name: string;
+  url: string;
+  path: string;
+  mime: string;
+  state: number;
+  percent: number;
+  received: number;
+  total: number;
+  speed: number;
 }
 
 const HOME_URL: string = 'resource://rawfile/home.html';
@@ -60,11 +76,18 @@ struct Index {
   @State webSrc: string = '';
   @State bookmarks: LinkItem[] = [];
   @State history: LinkItem[] = [];
+  @State downloads: DownloadRow[] = [];
+  @State downloadNonce: number = 0;
   @State panelMode: string = '';
   @State uaMode: string = 'mobile';
   @State showDebug: boolean = false;
+  private downloadDelegate: webview.WebDownloadDelegate = new webview.WebDownloadDelegate();
+  private downloadItems: Map<string, webview.WebDownloadItem> = new Map();
+  private downloadReady: boolean = false;
+  private progressTimer: number = -1;
 
   aboutToAppear(): void {
+    this.initDownloadDelegate();
     const su: string | undefined = AppStorage.get<string>('startUrl');
     if (su !== undefined && su.length > 0) {
       this.pendingUrl = su;
@@ -176,6 +199,331 @@ struct Index {
         Log.warn('debug save failed');
       }
     }
+  }
+
+  private initDownloadDelegate(): void {
+    if (this.downloadReady) {
+      return;
+    }
+    this.downloadReady = true;
+    this.downloadDelegate.onBeforeDownload((item: webview.WebDownloadItem) => {
+      this.beginDownload(item);
+    });
+    this.downloadDelegate.onDownloadUpdated((item: webview.WebDownloadItem) => {
+      this.downloadItems.set(item.getGuid(), item);
+      this.syncDownload(item);
+    });
+    this.downloadDelegate.onDownloadFinish((item: webview.WebDownloadItem) => {
+      this.downloadItems.set(item.getGuid(), item);
+      this.finalizeDownload(item);
+      this.syncDownload(item);
+      this.status = '下载完成 ' + item.getSuggestedFileName();
+    });
+    this.downloadDelegate.onDownloadFailed((item: webview.WebDownloadItem) => {
+      this.syncDownload(item);
+      this.status = '下载失败 ' + item.getSuggestedFileName();
+    });
+  }
+
+  private downloadDir(): string {
+    const ctx = getContext(this) as common.UIAbilityContext;
+    return ctx.getApplicationContext().filesDir + '/downloads';
+  }
+
+  private safeFileName(suggested: string, url: string): string {
+    let name = suggested.trim();
+    if (name.length === 0) {
+      const q = url.indexOf('?');
+      const clean = q >= 0 ? url.substring(0, q) : url;
+      const slash = clean.lastIndexOf('/');
+      name = slash >= 0 ? clean.substring(slash + 1) : 'download';
+    }
+    let out = '';
+    for (let i = 0; i < name.length; i++) {
+      const ch = name.charAt(i);
+      if (ch === '\\' || ch === '/' || ch === ':' || ch === '*' || ch === '?' ||
+        ch === '"' || ch === '<' || ch === '>' || ch === '|' || ch.charCodeAt(0) < 32) {
+        out += '_';
+      } else {
+        out += ch;
+      }
+    }
+    name = out.trim();
+    if (name.length === 0) {
+      name = 'download';
+    }
+    if (name.length > 100) {
+      name = name.substring(name.length - 100);
+    }
+    return name;
+  }
+
+  private uniqueDownloadPath(name: string): string {
+    const dir = this.downloadDir();
+    try {
+      fs.mkdirSync(dir, true);
+    } catch (e) {
+      Log.warn('download mkdir failed ' + dir);
+    }
+    const dot = name.lastIndexOf('.');
+    const stem = dot > 0 ? name.substring(0, dot) : name;
+    const ext = dot > 0 ? name.substring(dot) : '';
+    let candidate = name;
+    let n = 1;
+    while (n < 100) {
+      if (!fs.accessSync(dir + '/' + candidate)) {
+        break;
+      }
+      candidate = stem + '_' + n + ext;
+      n++;
+    }
+    return dir + '/' + candidate;
+  }
+
+  private beginDownload(item: webview.WebDownloadItem): void {
+    const guid = item.getGuid();
+    if (this.downloadItems.has(guid)) {
+      return;
+    }
+    const name = this.safeFileName(item.getSuggestedFileName(), item.getUrl());
+    const path = this.uniqueDownloadPath(name);
+    let total = -1;
+    let mime = '';
+    let url = '';
+    try {
+      total = item.getTotalBytes();
+      mime = item.getMimeType();
+      url = item.getUrl();
+    } catch (e) {
+    }
+    this.downloadItems.set(guid, item);
+    this.downloads.unshift({
+      guid: guid, name: name, url: url, path: path, mime: mime,
+      state: webview.WebDownloadState.PENDING,
+      percent: 0, received: 0, total: total, speed: 0
+    });
+    this.downloads = this.downloads.slice(0, this.downloads.length);
+    this.panelMode = 'downloads';
+    this.startProgressTimer();
+    try {
+      item.start(path);
+      this.status = '开始下载 ' + name;
+      Log.info('download start ' + path);
+    } catch (e) {
+      this.updateDownloadState(guid, webview.WebDownloadState.INTERRUPTED);
+      this.status = '下载启动失败';
+      Log.warn('download start failed');
+    }
+  }
+
+  private startProgressTimer(): void {
+    if (this.progressTimer >= 0) {
+      return;
+    }
+    this.progressTimer = setInterval(() => {
+      let active = 0;
+      for (let i = 0; i < this.downloads.length; i++) {
+        const row = this.downloads[i];
+        if (row.state === webview.WebDownloadState.IN_PROGRESS ||
+          row.state === webview.WebDownloadState.PENDING) {
+          active++;
+          const item = this.downloadItems.get(row.guid);
+          if (item !== undefined) {
+            this.syncDownload(item);
+          }
+          try {
+            const stat = fs.statSync(row.path);
+            if (stat.size > 0) {
+              row.received = stat.size;
+              row.state = webview.WebDownloadState.IN_PROGRESS;
+              if (row.total > 0) {
+                row.percent = Math.min(100, Math.floor(stat.size * 100 / row.total));
+              }
+            }
+          } catch (e) {
+          }
+        }
+      }
+      this.downloads = this.downloads.slice(0, this.downloads.length);
+      this.downloadNonce++;
+      if (active === 0) {
+        clearInterval(this.progressTimer);
+        this.progressTimer = -1;
+      }
+    }, 500);
+  }
+
+  private downloadIndex(guid: string): number {
+    for (let i = 0; i < this.downloads.length; i++) {
+      if (this.downloads[i].guid === guid) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private updateDownloadState(guid: string, state: number): void {
+    const idx = this.downloadIndex(guid);
+    if (idx >= 0) {
+      this.downloads[idx].state = state;
+      this.downloads = this.downloads.slice(0, this.downloads.length);
+      this.downloadNonce++;
+    }
+  }
+
+  private syncDownload(item: webview.WebDownloadItem): void {
+    const guid = item.getGuid();
+    const idx = this.downloadIndex(guid);
+    if (idx < 0) {
+      return;
+    }
+    try {
+      const row = this.downloads[idx];
+      row.state = item.getState();
+      const p = item.getPercentComplete();
+      row.percent = p < 0 ? 0 : p;
+      row.received = item.getReceivedBytes();
+      row.total = item.getTotalBytes();
+      row.speed = item.getCurrentSpeed();
+      this.downloads = this.downloads.slice(0, this.downloads.length);
+      this.downloadNonce++;
+    } catch (e) {
+      Log.warn('download sync failed');
+    }
+  }
+
+  private finalizeDownload(item: webview.WebDownloadItem): void {
+    const idx = this.downloadIndex(item.getGuid());
+    if (idx < 0) {
+      return;
+    }
+    const row = this.downloads[idx];
+    let source = '';
+    try {
+      source = item.getFullPath();
+    } catch (e) {
+      return;
+    }
+    if (source.length === 0 || source === row.path) {
+      return;
+    }
+    try {
+      fs.mkdirSync(this.downloadDir(), true);
+      fs.copyFileSync(source, row.path);
+      Log.info('download copied ' + source + ' -> ' + row.path);
+    } catch (e) {
+      row.path = source;
+      Log.warn('download copy failed ' + source);
+    }
+  }
+
+  private pauseDownload(row: DownloadRow): void {
+    const item = this.downloadItems.get(row.guid);
+    if (item === undefined) {
+      return;
+    }
+    try {
+      item.pause();
+      this.updateDownloadState(row.guid, webview.WebDownloadState.PAUSED);
+      this.status = '已暂停 ' + row.name;
+    } catch (e) {
+      this.status = '暂停失败';
+    }
+  }
+
+  private resumeDownload(row: DownloadRow): void {
+    const item = this.downloadItems.get(row.guid);
+    if (item === undefined) {
+      return;
+    }
+    try {
+      item.resume();
+      this.updateDownloadState(row.guid, webview.WebDownloadState.IN_PROGRESS);
+      this.startProgressTimer();
+      this.status = '继续下载 ' + row.name;
+    } catch (e) {
+      try {
+        webview.WebDownloadManager.resumeDownload(item);
+        this.status = '继续下载 ' + row.name;
+      } catch (e2) {
+        this.status = '继续失败';
+      }
+    }
+  }
+
+  private cancelDownload(row: DownloadRow): void {
+    const item = this.downloadItems.get(row.guid);
+    if (item === undefined) {
+      return;
+    }
+    try {
+      item.cancel();
+      this.updateDownloadState(row.guid, webview.WebDownloadState.CANCELED);
+      this.status = '已取消 ' + row.name;
+    } catch (e) {
+      this.status = '取消失败';
+    }
+  }
+
+  private openDownload(row: DownloadRow): void {
+    try {
+      const ctx = getContext(this) as common.UIAbilityContext;
+      const want: Want = {
+        action: 'ohos.want.action.viewData',
+        uri: fileUri.getUriFromPath(row.path),
+        type: row.mime.length > 0 ? row.mime : '*/*'
+      };
+      ctx.startAbility(want);
+    } catch (e) {
+      this.status = '无法打开文件';
+      Log.warn('open download failed');
+    }
+  }
+
+  private clearDownloads(): void {
+    const keep: DownloadRow[] = [];
+    for (let i = 0; i < this.downloads.length; i++) {
+      const state = this.downloads[i].state;
+      if (state === webview.WebDownloadState.IN_PROGRESS ||
+        state === webview.WebDownloadState.PENDING ||
+        state === webview.WebDownloadState.PAUSED) {
+        keep.push(this.downloads[i]);
+      }
+    }
+    this.downloads = keep;
+  }
+
+  private formatSize(bytes: number): string {
+    if (bytes < 0) {
+      return '未知大小';
+    }
+    if (bytes < 1024) {
+      return bytes.toString() + ' B';
+    }
+    if (bytes < 1024 * 1024) {
+      return Math.round(bytes / 1024).toString() + ' KB';
+    }
+    return (Math.round(bytes / (1024 * 1024) * 10) / 10).toString() + ' MB';
+  }
+
+  private downloadStateText(row: DownloadRow): string {
+    if (row.state === webview.WebDownloadState.COMPLETED) {
+      return '已完成 · ' + this.formatSize(row.total);
+    }
+    if (row.state === webview.WebDownloadState.PAUSED) {
+      return '已暂停 · ' + Math.round(row.percent).toString() + '%';
+    }
+    if (row.state === webview.WebDownloadState.CANCELED) {
+      return '已取消';
+    }
+    if (row.state === webview.WebDownloadState.INTERRUPTED) {
+      return '下载失败';
+    }
+    if (row.state === webview.WebDownloadState.PENDING) {
+      return '等待中';
+    }
+    return '下载中 ' + Math.round(row.percent).toString() + '% · ' +
+      this.formatSize(row.received) + ' / ' + this.formatSize(row.total);
   }
 
   private tabWidth(): number {
@@ -291,11 +639,20 @@ struct Index {
       this.history = [];
       this.saveLinks('history', this.history);
       this.status = '历史已清空';
+    } else if (this.panelMode === 'downloads') {
+      this.clearDownloads();
+      this.status = '已清理下载记录';
     }
   }
 
   private panelItems(): LinkItem[] {
-    return this.panelMode === 'bookmarks' ? this.bookmarks : this.history;
+    if (this.panelMode === 'bookmarks') {
+      return this.bookmarks;
+    }
+    if (this.panelMode === 'history') {
+      return this.history;
+    }
+    return [];
   }
 
   private touch(): void {
@@ -643,6 +1000,11 @@ struct Index {
             .forceDarkAccess(false)
             .onControllerAttached(() => {
               this.applyUserAgent();
+              try {
+                this.controller.setDownloadDelegate(this.downloadDelegate);
+              } catch (e) {
+                Log.warn('download delegate set failed');
+              }
             })
             .onPageBegin((event?: PageEvent) => {
               this.pageStart = Date.now();
@@ -760,20 +1122,31 @@ struct Index {
           Column({ space: 10 }) {
             Row({ space: 8 }) {
               Button('书签 ' + this.bookmarks.length)
-                .height(32)
-                .fontSize(12)
+                .height(30)
+                .fontSize(11)
+                .padding({ left: 6, right: 6 })
                 .backgroundColor(this.panelMode === 'bookmarks' ? '#3D7BFF' : '#151D29')
                 .fontColor('#E8F0FB')
                 .onClick(() => {
                   this.panelMode = 'bookmarks';
                 })
               Button('历史 ' + this.history.length)
-                .height(32)
-                .fontSize(12)
+                .height(30)
+                .fontSize(11)
+                .padding({ left: 6, right: 6 })
                 .backgroundColor(this.panelMode === 'history' ? '#3D7BFF' : '#151D29')
                 .fontColor('#E8F0FB')
                 .onClick(() => {
                   this.panelMode = 'history';
+                })
+              Button('下载 ' + this.downloads.length)
+                .height(30)
+                .fontSize(11)
+                .padding({ left: 6, right: 6 })
+                .backgroundColor(this.panelMode === 'downloads' ? '#3D7BFF' : '#151D29')
+                .fontColor('#E8F0FB')
+                .onClick(() => {
+                  this.panelMode = 'downloads';
                 })
               Blank()
               Button('清空')
@@ -795,7 +1168,133 @@ struct Index {
             }
             .width('100%')
 
-            if (this.panelItems().length === 0) {
+            if (this.panelMode === 'downloads') {
+              if (this.downloads.length === 0) {
+                Column({ space: 6 }) {
+                  Text('暂无下载')
+                    .fontSize(13)
+                    .fontColor('#8295AD')
+                  Text('网页触发下载后自动出现在这里')
+                    .fontSize(11)
+                    .fontColor('#5E718A')
+                }
+                .width('100%')
+                .layoutWeight(1)
+                .justifyContent(FlexAlign.Center)
+              } else {
+                List({ space: 6 }) {
+                  ForEach(this.downloads, (d: DownloadRow, idx: number) => {
+                    ListItem() {
+                      Column({ space: 5 }) {
+                        Row({ space: 6 }) {
+                          Column({ space: 3 }) {
+                            Text(d.name)
+                              .fontSize(12)
+                              .fontColor('#E8F0FB')
+                              .maxLines(1)
+                              .textOverflow({ overflow: TextOverflow.Ellipsis })
+                              .width('100%')
+                            Text(this.downloadStateText(d) + (this.downloadNonce >= 0 ? '' : ''))
+                              .fontSize(10)
+                              .fontColor('#8295AD')
+                              .maxLines(1)
+                              .textOverflow({ overflow: TextOverflow.Ellipsis })
+                              .width('100%')
+                          }
+                          .layoutWeight(1)
+                          .alignItems(HorizontalAlign.Start)
+
+                          if (d.state === webview.WebDownloadState.IN_PROGRESS ||
+                            d.state === webview.WebDownloadState.PENDING) {
+                            Button('暂停')
+                              .width(40)
+                              .height(28)
+                              .fontSize(10)
+                              .padding(0)
+                              .backgroundColor('#243247')
+                              .fontColor('#DCE7F7')
+                              .onClick(() => {
+                                this.pauseDownload(d);
+                              })
+                            Button('取消')
+                              .width(40)
+                              .height(28)
+                              .fontSize(10)
+                              .padding(0)
+                              .backgroundColor('#2A1B1F')
+                              .fontColor('#FF9C9C')
+                              .onClick(() => {
+                                this.cancelDownload(d);
+                              })
+                          } else if (d.state === webview.WebDownloadState.PAUSED) {
+                            Button('继续')
+                              .width(40)
+                              .height(28)
+                              .fontSize(10)
+                              .padding(0)
+                              .backgroundColor('#243247')
+                              .fontColor('#DCE7F7')
+                              .onClick(() => {
+                                this.resumeDownload(d);
+                              })
+                            Button('取消')
+                              .width(40)
+                              .height(28)
+                              .fontSize(10)
+                              .padding(0)
+                              .backgroundColor('#2A1B1F')
+                              .fontColor('#FF9C9C')
+                              .onClick(() => {
+                                this.cancelDownload(d);
+                              })
+                          } else if (d.state === webview.WebDownloadState.COMPLETED) {
+                            Button('打开')
+                              .width(40)
+                              .height(28)
+                              .fontSize(10)
+                              .padding(0)
+                              .backgroundColor('#243247')
+                              .fontColor('#DCE7F7')
+                              .onClick(() => {
+                                this.openDownload(d);
+                              })
+                          } else {
+                            Button('重试')
+                              .width(40)
+                              .height(28)
+                              .fontSize(10)
+                              .padding(0)
+                              .backgroundColor('#243247')
+                              .fontColor('#DCE7F7')
+                              .onClick(() => {
+                                this.resumeDownload(d);
+                              })
+                          }
+                        }
+                        .width('100%')
+
+                        if (d.state === webview.WebDownloadState.IN_PROGRESS ||
+                          d.state === webview.WebDownloadState.PAUSED ||
+                          d.state === webview.WebDownloadState.PENDING) {
+                          Progress({ value: d.percent + (this.downloadNonce >= 0 ? 0 : 0), total: 100, type: ProgressType.Linear })
+                            .width('100%')
+                            .height(2)
+                            .color('#3D7BFF')
+                            .backgroundColor('#253346')
+                        }
+                      }
+                      .width('100%')
+                      .padding(10)
+                      .backgroundColor('#151D29')
+                      .borderRadius(8)
+                    }
+                  }, (d: DownloadRow, idx: number) => d.guid + '_' + d.state.toString())
+                }
+                .width('100%')
+                .layoutWeight(1)
+                .scrollBar(BarState.Off)
+              }
+            } else if (this.panelItems().length === 0) {
               Column({ space: 6 }) {
                 Text(this.panelMode === 'bookmarks' ? '暂无书签' : '暂无历史')
                   .fontSize(13)

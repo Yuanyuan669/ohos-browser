@@ -102,6 +102,23 @@
 - 构建：unsigned 1,066,637 bytes；signed 1,072,184 bytes；API 10 安装正常。
 - 限制：目前只切 UA，不改 viewport；少数站点仍按实际视口做响应式布局，必要时再补桌面视口模拟。
 
+## 2026-11-18 M4：下载
+
+- 升级 API：`compileSdkVersion` / `compatibleSdkVersion` 10 → 11；实测 `install -r` 报 `9568282 install releaseType target not same`，必须卸载重装。
+- 重装前用 hdc 拉取 `preferences/browser`，重装后 push 回并 chown，书签/历史成功保留。
+- 下载代理：`WebviewController.setDownloadDelegate(new WebDownloadDelegate())`：
+  - `onBeforeDownload` 取建议文件名，清洗非法字符、同名自动加 `_n`，调用 `item.start(path)`。
+  - 保存到应用级 `filesDir/downloads`（`getApplicationContext().filesDir`；模块级 `haps/entry/files` 无写权限）。
+  - `onDownloadUpdated/Finish/Failed` 更新状态；`finalizeDownload` 在路径不一致时从引擎临时路径复制到目标路径。
+- 进度：ArkTS 侧 `WebDownloadItem` 的进度读取不稳定，改为每 500ms `fs.statSync(row.path)` 轮询已写入字节数；稳定 key `guid_state` 避免进度刷新打断按钮点击，文字用 nonce 触发刷新。
+- UI：面板新增“下载 n”页；下载行显示文件名、状态、字节进度条、暂停/继续/取消/重试/打开；清空只移除已完成/已取消/失败记录，保留进行中任务。
+- 实测：
+  - 16MB 文件：进度递增，完成后落到 `files/downloads/m4-test.bin`；源文件与下载文件 SHA256 均为 `080ACF35...9643E`。
+  - 128MB 文件：下载到 1% 暂停（已暂停 · 1%），点继续后继续增长；取消后显示“已取消/重试”。
+  - 面板三页签与按钮在 1080x2408 实机布局正常。
+- 构建：unsigned 1,165,128 bytes；signed 1,170,679 bytes。
+- 限制：下载记录只在内存，重启后记录清空但文件保留；未做公共 Downloads 导出和断点续传持久化；`打开` 使用 `ohos.want.action.viewData`，无对应查看器时只提示失败。
+
 ## M4 预研：下载可行性（2026-11-17）
 
 - **API 11 WebDownloadDelegate（推荐）**：`controller.setDownloadDelegate(delegate)`，`WebDownloadItem` 提供
