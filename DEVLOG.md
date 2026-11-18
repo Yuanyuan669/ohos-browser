@@ -85,6 +85,23 @@
   2. 删除按钮不能放在整行 `onClick` 里，避免“删”触发打开；点击区域只放在标题列。
 - 状态：M3 完成；M4（下载）仍受 API 11 升级/卸载重装约束。
 
+## 2026-11-18 M3.1：布局、UA 与调试开关
+
+- 布局参考 Chrome Android / Safari：顶部地址栏，底部集中操作区；标签不再随数量拉满整行。
+- 标签宽度按数量自适应：1 个 110vp，2/3 个按剩余空间收缩（下限 58vp），右侧 `+`/`关` 固定；3 标签实测不溢出。
+- 地址栏保持 `layoutWeight(1)` 自适应；收藏按钮 44vp、`padding(0)`，星形完整显示；打开按钮 58vp。
+- 底部按钮统一放进一个深色圆角工具条：`←` `→` `刷新/停止` `主页` `书签` `手机/电脑`，不再是各自独立的散按钮。
+- `列表` 改名 `书签`；面板内仍然是“书签 / 历史”两页，避免入口含义不清。
+- UA 切换：
+  - 原 UA：`Mozilla/5.0 (Phone; OpenHarmony 4.1) AppleWebKit/537.36 (KHTML, like Gecko) HomeBrowser/0.1`
+  - 手机（默认）：`Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36`
+  - 电脑：`Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36`
+  - `uaMode` 持久化；切换后立即 reload，当前按钮显示 `手机`/`电脑`。
+- 页面信息/耗时默认隐藏；面板底部新增“显示页面信息与加载耗时”开关，`showDebug` 持久化；打开后才显示标题、完成耗时和当前 UA 档位。
+- 实测：单标签紧凑、3 标签不溢出；手机/电脑 UA 在本地主页回显；杀进程重启后 desktop UA 与调试开关状态保持；面板打开/关闭正常。
+- 构建：unsigned 1,066,637 bytes；signed 1,072,184 bytes；API 10 安装正常。
+- 限制：目前只切 UA，不改 viewport；少数站点仍按实际视口做响应式布局，必要时再补桌面视口模拟。
+
 ## M4 预研：下载可行性（2026-11-17）
 
 - **API 11 WebDownloadDelegate（推荐）**：`controller.setDownloadDelegate(delegate)`，`WebDownloadItem` 提供

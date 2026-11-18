@@ -34,6 +34,10 @@ interface LinkItem {
 const HOME_URL: string = 'resource://rawfile/home.html';
 const MAX_TABS: number = 3;
 const MAX_HISTORY: number = 100;
+const UA_MOBILE: string = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
+const UA_DESKTOP: string = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 @Entry
 @Component
@@ -57,6 +61,8 @@ struct Index {
   @State bookmarks: LinkItem[] = [];
   @State history: LinkItem[] = [];
   @State panelMode: string = '';
+  @State uaMode: string = 'mobile';
+  @State showDebug: boolean = false;
 
   aboutToAppear(): void {
     const su: string | undefined = AppStorage.get<string>('startUrl');
@@ -82,6 +88,11 @@ struct Index {
       this.active = a >= 0 && a < this.tabs.length ? a : 0;
       this.bookmarks = this.decodeLinks(await this.prefs.get('bookmarks', '') as string);
       this.history = this.decodeLinks(await this.prefs.get('history', '') as string);
+      const ua = await this.prefs.get('uaMode', 'mobile') as string;
+      this.uaMode = ua === 'desktop' ? 'desktop' : 'mobile';
+      const dbg = await this.prefs.get('showDebug', false) as boolean;
+      this.showDebug = dbg === true;
+      this.applyUserAgent();
       const t = this.tabs[this.active];
       this.title = t.title;
       this.address = t.url;
@@ -128,6 +139,51 @@ struct Index {
     } catch (e) {
       Log.warn('links save failed ' + key);
     }
+  }
+
+  private applyUserAgent(): void {
+    try {
+      this.controller.setCustomUserAgent(this.uaMode === 'desktop' ? UA_DESKTOP : UA_MOBILE);
+    } catch (e) {
+      Log.warn('ua apply failed ' + this.uaMode);
+    }
+  }
+
+  private toggleUa(): void {
+    this.uaMode = this.uaMode === 'desktop' ? 'mobile' : 'desktop';
+    if (this.prefs !== null) {
+      try {
+        this.prefs.put('uaMode', this.uaMode);
+        this.prefs.flush();
+      } catch (e) {
+        Log.warn('ua save failed');
+      }
+    }
+    this.applyUserAgent();
+    const url = this.currentHttpUrl();
+    this.load(url);
+    this.status = this.uaMode === 'desktop' ? '电脑版 UA' : '手机版 UA';
+    Log.info('ua mode ' + this.uaMode);
+  }
+
+  private setShowDebug(on: boolean): void {
+    this.showDebug = on;
+    if (this.prefs !== null) {
+      try {
+        this.prefs.put('showDebug', on);
+        this.prefs.flush();
+      } catch (e) {
+        Log.warn('debug save failed');
+      }
+    }
+  }
+
+  private tabWidth(): number {
+    const n = this.tabs.length;
+    if (n <= 1) {
+      return 110;
+    }
+    return Math.max(58, Math.floor((226 - (n - 1) * 6) / n));
   }
 
   private saveSession(): void {
@@ -410,7 +466,7 @@ struct Index {
               .textOverflow({ overflow: TextOverflow.Ellipsis })
               .layoutWeight(1)
           }
-          .layoutWeight(1)
+          .width(this.tabWidth())
           .height(30)
           .padding({ left: 8, right: 8 })
           .backgroundColor(i === this.active ? '#1E2B40' : '#111720')
@@ -419,6 +475,7 @@ struct Index {
             this.switchTab(i);
           })
         }, (t: TabInfo, i: number) => i.toString() + t.url + t.title)
+        Blank()
         Button('+')
           .height(30)
           .width(42)
@@ -457,16 +514,20 @@ struct Index {
           })
         Button(this.isBookmarked() ? '★' : '☆')
           .height(40)
-          .width(42)
-          .fontSize(19)
+          .width(44)
+          .fontSize(21)
+          .padding(0)
           .backgroundColor('#151D29')
+          .borderRadius(9)
           .fontColor(this.isBookmarked() ? '#FFD166' : '#9FB2CC')
           .onClick(() => {
             this.toggleBookmark();
           })
         Button('打开')
           .height(40)
+          .width(58)
           .fontSize(13)
+          .padding(0)
           .backgroundColor('#3D7BFF')
           .onClick(() => {
             this.openAddress();
@@ -474,12 +535,13 @@ struct Index {
       }
       .width('100%')
 
-      Row({ space: 8 }) {
+      Row({ space: 3 }) {
         Button('←')
-          .height(34)
+          .height(32)
           .layoutWeight(1)
+          .padding(0)
           .fontSize(16)
-          .backgroundColor('#151D29')
+          .backgroundColor(Color.Transparent)
           .fontColor(this.canBack ? '#DCE7F7' : '#4A586B')
           .enabled(this.canBack)
           .onClick(() => {
@@ -488,10 +550,11 @@ struct Index {
             }
           })
         Button('→')
-          .height(34)
+          .height(32)
           .layoutWeight(1)
+          .padding(0)
           .fontSize(16)
-          .backgroundColor('#151D29')
+          .backgroundColor(Color.Transparent)
           .fontColor(this.canForward ? '#DCE7F7' : '#4A586B')
           .enabled(this.canForward)
           .onClick(() => {
@@ -500,47 +563,65 @@ struct Index {
             }
           })
         Button(this.loading ? '停止' : '刷新')
-          .height(34)
+          .height(32)
           .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#151D29')
+          .padding(0)
+          .fontSize(11)
+          .backgroundColor(Color.Transparent)
           .fontColor('#DCE7F7')
           .onClick(() => {
             this.refreshOrStop();
           })
         Button('主页')
-          .height(34)
+          .height(32)
           .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor('#151D29')
+          .padding(0)
+          .fontSize(11)
+          .backgroundColor(Color.Transparent)
           .fontColor('#DCE7F7')
           .onClick(() => {
             this.goHome();
           })
-        Button('列表')
-          .height(34)
+        Button('书签')
+          .height(32)
           .layoutWeight(1)
-          .fontSize(12)
-          .backgroundColor(this.panelMode.length > 0 ? '#3D7BFF' : '#151D29')
+          .padding(0)
+          .fontSize(11)
+          .backgroundColor(this.panelMode.length > 0 ? '#263A57' : Color.Transparent)
           .fontColor('#DCE7F7')
           .onClick(() => {
             this.panelMode = this.panelMode.length > 0 ? '' : 'bookmarks';
           })
-      }
-      .width('100%')
-
-      Row({ space: 8 }) {
-        Text(this.title)
-          .fontSize(11)
-          .fontColor('#9FB2CC')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Button(this.uaMode === 'desktop' ? '电脑UA' : '手机UA')
+          .height(32)
           .layoutWeight(1)
-        Text(this.status)
+          .padding(0)
           .fontSize(10)
-          .fontColor('#6E8098')
+          .backgroundColor(this.uaMode === 'desktop' ? '#263A57' : Color.Transparent)
+          .fontColor(this.uaMode === 'desktop' ? '#8FB8FF' : '#DCE7F7')
+          .onClick(() => {
+            this.toggleUa();
+          })
       }
       .width('100%')
+      .padding(4)
+      .backgroundColor('#111720')
+      .borderRadius(12)
+
+      if (this.showDebug) {
+        Row({ space: 8 }) {
+          Text(this.title)
+            .fontSize(11)
+            .fontColor('#9FB2CC')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+          Text(this.status + ' · ' + (this.uaMode === 'desktop' ? 'PC UA' : 'Mobile UA'))
+            .fontSize(10)
+            .fontColor('#6E8098')
+        }
+        .width('100%')
+      }
 
       if (this.progress > 0 && this.progress < 100) {
         Progress({ value: this.progress, total: 100, type: ProgressType.Linear })
@@ -561,11 +642,7 @@ struct Index {
             .darkMode(WebDarkMode.Off)
             .forceDarkAccess(false)
             .onControllerAttached(() => {
-              try {
-                this.controller.setCustomUserAgent(
-                  'Mozilla/5.0 (Phone; OpenHarmony 4.1) AppleWebKit/537.36 (KHTML, like Gecko) HomeBrowser/0.1');
-              } catch (e) {
-              }
+              this.applyUserAgent();
             })
             .onPageBegin((event?: PageEvent) => {
               this.pageStart = Date.now();
@@ -719,12 +796,17 @@ struct Index {
             .width('100%')
 
             if (this.panelItems().length === 0) {
-              Text(this.panelMode === 'bookmarks' ? '暂无书签' : '暂无历史')
-                .fontSize(13)
-                .fontColor('#8295AD')
-                .width('100%')
-                .layoutWeight(1)
-                .textAlign(TextAlign.Center)
+              Column({ space: 6 }) {
+                Text(this.panelMode === 'bookmarks' ? '暂无书签' : '暂无历史')
+                  .fontSize(13)
+                  .fontColor('#8295AD')
+                Text(this.panelMode === 'bookmarks' ? '点地址栏 ☆ 收藏当前页' : '打开网页后自动记录')
+                  .fontSize(11)
+                  .fontColor('#5E718A')
+              }
+              .width('100%')
+              .layoutWeight(1)
+              .justifyContent(FlexAlign.Center)
             } else {
               List({ space: 6 }) {
                 ForEach(this.panelItems(), (it: LinkItem, idx: number) => {
@@ -772,6 +854,20 @@ struct Index {
               .layoutWeight(1)
               .scrollBar(BarState.Off)
             }
+
+            Row({ space: 8 }) {
+              Text('显示页面信息与加载耗时')
+                .fontSize(11)
+                .fontColor('#8295AD')
+                .layoutWeight(1)
+              Toggle({ type: ToggleType.Switch, isOn: this.showDebug })
+                .selectedColor('#3D7BFF')
+                .onChange((on: boolean) => {
+                  this.setShowDebug(on);
+                })
+            }
+            .width('100%')
+            .height(32)
           }
           .width('100%')
           .height('100%')
