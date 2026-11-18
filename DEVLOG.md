@@ -68,6 +68,23 @@
 - 下一步 M3：书签/历史（preferences）。
 
 
+## 2026-11-18 M3：书签与历史
+
+- 书签：地址栏 `☆/★` 一键收藏/取消；按 URL 去重；标题取当前页标题，空标题回退 URL。
+- 历史：主框架 HTTP(S) 页面 `onPageEnd` 自动记录；按 URL 去重并置顶，最多 100 条；主页 `resource://` 不记录。
+- 面板：工具栏“列表”打开覆盖层，不销毁 Web（保留页面状态）；书签/历史分页、条数、单项删除、清空、点击条目直接打开。
+- 持久化：`preferences` 键 `bookmarks` / `history`，JSON 数组 `{url,title,time}`；启动与标签会话一起恢复。
+- 实测：
+  - `https://example.com` 打开后点星：书签 1、历史 1，状态“已收藏”，星变黄。
+  - 杀进程重启：日志 `session restored 1 tabs, 1 bookmarks, 1 history`；页面、星标、面板列表均恢复。
+  - 面板内删书签：书签 0、星恢复空心、显示“暂无书签”；清空历史：历史 0、显示“暂无历史”。
+  - 清空后刷新页面：历史重新记为 1；点击历史条目可关闭面板并重新加载该 URL。
+  - 构建：unsigned 1,045,383 bytes；signed 1,048,000 bytes；API 10 安装正常。
+- 坑：
+  1. 面板列表原来用 `Scroll > Column`，单项内容在剩余空间里垂直居中；改用 `List` + 面板 `justifyContent(FlexAlign.Start)`，列表从顶部开始。
+  2. 删除按钮不能放在整行 `onClick` 里，避免“删”触发打开；点击区域只放在标题列。
+- 状态：M3 完成；M4（下载）仍受 API 11 升级/卸载重装约束。
+
 ## M4 预研：下载可行性（2026-11-17）
 
 - **API 11 WebDownloadDelegate（推荐）**：`controller.setDownloadDelegate(delegate)`，`WebDownloadItem` 提供

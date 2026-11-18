@@ -25,8 +25,15 @@ interface TabInfo {
   title: string;
 }
 
+interface LinkItem {
+  url: string;
+  title: string;
+  time: number;
+}
+
 const HOME_URL: string = 'resource://rawfile/home.html';
 const MAX_TABS: number = 3;
+const MAX_HISTORY: number = 100;
 
 @Entry
 @Component
@@ -47,6 +54,9 @@ struct Index {
   private prefs: preferences.Preferences | null = null;
   @State webNonce: number = 0;
   @State webSrc: string = '';
+  @State bookmarks: LinkItem[] = [];
+  @State history: LinkItem[] = [];
+  @State panelMode: string = '';
 
   aboutToAppear(): void {
     const su: string | undefined = AppStorage.get<string>('startUrl');
@@ -70,15 +80,53 @@ struct Index {
       }
       const a = await this.prefs.get('active', 0) as number;
       this.active = a >= 0 && a < this.tabs.length ? a : 0;
+      this.bookmarks = this.decodeLinks(await this.prefs.get('bookmarks', '') as string);
+      this.history = this.decodeLinks(await this.prefs.get('history', '') as string);
       const t = this.tabs[this.active];
       this.title = t.title;
       this.address = t.url;
       if (this.pendingUrl.length === 0 && t.url.length > 0) {
         this.pendingUrl = t.url;
       }
-      Log.info('session restored ' + this.tabs.length + ' tabs');
+      Log.info('session restored ' + this.tabs.length + ' tabs, ' +
+        this.bookmarks.length + ' bookmarks, ' + this.history.length + ' history');
     } catch (e) {
       Log.warn('session load failed');
+    }
+  }
+
+  private decodeLinks(raw: string): LinkItem[] {
+    const out: LinkItem[] = [];
+    if (raw.length < 3) {
+      return out;
+    }
+    try {
+      const arr = JSON.parse(raw) as LinkItem[];
+      for (let i = 0; i < arr.length; i++) {
+        const it = arr[i];
+        if (it !== undefined && typeof it.url === 'string' && it.url.length > 0) {
+          out.push({
+            url: it.url,
+            title: typeof it.title === 'string' && it.title.length > 0 ? it.title : it.url,
+            time: typeof it.time === 'number' ? it.time : 0
+          });
+        }
+      }
+    } catch (e) {
+      Log.warn('links decode failed');
+    }
+    return out;
+  }
+
+  private saveLinks(key: string, items: LinkItem[]): void {
+    if (this.prefs === null) {
+      return;
+    }
+    try {
+      this.prefs.put(key, JSON.stringify(items));
+      this.prefs.flush();
+    } catch (e) {
+      Log.warn('links save failed ' + key);
     }
   }
 
@@ -93,6 +141,105 @@ struct Index {
     } catch (e) {
       Log.warn('session save failed');
     }
+  }
+
+  private currentHttpUrl(): string {
+    if (this.address.indexOf('http://') === 0 || this.address.indexOf('https://') === 0) {
+      return this.address;
+    }
+    const u = this.activeTabUrl();
+    if (u.indexOf('http://') === 0 || u.indexOf('https://') === 0) {
+      return u;
+    }
+    return '';
+  }
+
+  private linkIndex(items: LinkItem[], url: string): number {
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].url === url) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private isBookmarked(): boolean {
+    const url = this.currentHttpUrl();
+    return url.length > 0 && this.linkIndex(this.bookmarks, url) >= 0;
+  }
+
+  private toggleBookmark(): void {
+    const url = this.currentHttpUrl();
+    if (url.length === 0) {
+      this.status = '当前页不能收藏';
+      return;
+    }
+    const idx = this.linkIndex(this.bookmarks, url);
+    if (idx >= 0) {
+      this.bookmarks.splice(idx, 1);
+      this.bookmarks = this.bookmarks.slice(0, this.bookmarks.length);
+      this.status = '已取消收藏';
+    } else {
+      const title = this.title.length > 0 && this.title !== '浏览器' ? this.title : url;
+      this.bookmarks.unshift({ url: url, title: title, time: Date.now() });
+      this.bookmarks = this.bookmarks.slice(0, this.bookmarks.length);
+      this.status = '已收藏';
+    }
+    this.saveLinks('bookmarks', this.bookmarks);
+  }
+
+  private recordHistory(url: string, title: string): void {
+    if (url.indexOf('http://') !== 0 && url.indexOf('https://') !== 0) {
+      return;
+    }
+    const idx = this.linkIndex(this.history, url);
+    if (idx >= 0) {
+      this.history.splice(idx, 1);
+    }
+    this.history.unshift({
+      url: url,
+      title: title.length > 0 ? title : url,
+      time: Date.now()
+    });
+    if (this.history.length > MAX_HISTORY) {
+      this.history.splice(MAX_HISTORY, this.history.length - MAX_HISTORY);
+    }
+    this.history = this.history.slice(0, this.history.length);
+    this.saveLinks('history', this.history);
+  }
+
+  private openLink(item: LinkItem): void {
+    this.panelMode = '';
+    this.address = item.url;
+    this.load(item.url);
+  }
+
+  private deleteLink(index: number): void {
+    if (this.panelMode === 'bookmarks') {
+      this.bookmarks.splice(index, 1);
+      this.bookmarks = this.bookmarks.slice(0, this.bookmarks.length);
+      this.saveLinks('bookmarks', this.bookmarks);
+    } else if (this.panelMode === 'history') {
+      this.history.splice(index, 1);
+      this.history = this.history.slice(0, this.history.length);
+      this.saveLinks('history', this.history);
+    }
+  }
+
+  private clearPanel(): void {
+    if (this.panelMode === 'bookmarks') {
+      this.bookmarks = [];
+      this.saveLinks('bookmarks', this.bookmarks);
+      this.status = '书签已清空';
+    } else if (this.panelMode === 'history') {
+      this.history = [];
+      this.saveLinks('history', this.history);
+      this.status = '历史已清空';
+    }
+  }
+
+  private panelItems(): LinkItem[] {
+    return this.panelMode === 'bookmarks' ? this.bookmarks : this.history;
   }
 
   private touch(): void {
@@ -308,6 +455,15 @@ struct Index {
           .onSubmit(() => {
             this.openAddress();
           })
+        Button(this.isBookmarked() ? '★' : '☆')
+          .height(40)
+          .width(42)
+          .fontSize(19)
+          .backgroundColor('#151D29')
+          .fontColor(this.isBookmarked() ? '#FFD166' : '#9FB2CC')
+          .onClick(() => {
+            this.toggleBookmark();
+          })
         Button('打开')
           .height(40)
           .fontSize(13)
@@ -360,6 +516,15 @@ struct Index {
           .fontColor('#DCE7F7')
           .onClick(() => {
             this.goHome();
+          })
+        Button('列表')
+          .height(34)
+          .layoutWeight(1)
+          .fontSize(12)
+          .backgroundColor(this.panelMode.length > 0 ? '#3D7BFF' : '#151D29')
+          .fontColor('#DCE7F7')
+          .onClick(() => {
+            this.panelMode = this.panelMode.length > 0 ? '' : 'bookmarks';
           })
       }
       .width('100%')
@@ -435,6 +600,9 @@ struct Index {
               if (this.active >= 0 && this.active < this.tabs.length) {
                 this.tabs[this.active].title = this.title;
               }
+              if (event !== undefined && (event.url.indexOf('http://') === 0 || event.url.indexOf('https://') === 0)) {
+                this.recordHistory(event.url, this.title);
+              }
               this.touch();
               this.saveSession();
               this.updateNav();
@@ -509,6 +677,107 @@ struct Index {
           .backgroundColor('#151D29')
           .borderRadius(14)
           .border({ width: 1, color: '#2A3A52' })
+        }
+
+        if (this.panelMode.length > 0) {
+          Column({ space: 10 }) {
+            Row({ space: 8 }) {
+              Button('书签 ' + this.bookmarks.length)
+                .height(32)
+                .fontSize(12)
+                .backgroundColor(this.panelMode === 'bookmarks' ? '#3D7BFF' : '#151D29')
+                .fontColor('#E8F0FB')
+                .onClick(() => {
+                  this.panelMode = 'bookmarks';
+                })
+              Button('历史 ' + this.history.length)
+                .height(32)
+                .fontSize(12)
+                .backgroundColor(this.panelMode === 'history' ? '#3D7BFF' : '#151D29')
+                .fontColor('#E8F0FB')
+                .onClick(() => {
+                  this.panelMode = 'history';
+                })
+              Blank()
+              Button('清空')
+                .height(32)
+                .fontSize(11)
+                .backgroundColor('#2A1B1F')
+                .fontColor('#FF9C9C')
+                .onClick(() => {
+                  this.clearPanel();
+                })
+              Button('关闭')
+                .height(32)
+                .fontSize(11)
+                .backgroundColor('#243247')
+                .fontColor('#E8F0FB')
+                .onClick(() => {
+                  this.panelMode = '';
+                })
+            }
+            .width('100%')
+
+            if (this.panelItems().length === 0) {
+              Text(this.panelMode === 'bookmarks' ? '暂无书签' : '暂无历史')
+                .fontSize(13)
+                .fontColor('#8295AD')
+                .width('100%')
+                .layoutWeight(1)
+                .textAlign(TextAlign.Center)
+            } else {
+              List({ space: 6 }) {
+                ForEach(this.panelItems(), (it: LinkItem, idx: number) => {
+                  ListItem() {
+                    Row({ space: 8 }) {
+                      Column({ space: 3 }) {
+                        Text(it.title)
+                          .fontSize(13)
+                          .fontColor('#E8F0FB')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .width('100%')
+                          .textAlign(TextAlign.Start)
+                        Text(it.url)
+                          .fontSize(10)
+                          .fontColor('#8295AD')
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          .width('100%')
+                          .textAlign(TextAlign.Start)
+                      }
+                      .layoutWeight(1)
+                      .alignItems(HorizontalAlign.Start)
+                      .onClick(() => {
+                        this.openLink(it);
+                      })
+                      Button('删')
+                        .width(42)
+                        .height(30)
+                        .fontSize(11)
+                        .backgroundColor('#2A1B1F')
+                        .fontColor('#FF9C9C')
+                        .onClick(() => {
+                          this.deleteLink(idx);
+                        })
+                    }
+                    .width('100%')
+                    .padding(10)
+                    .backgroundColor('#151D29')
+                    .borderRadius(8)
+                  }
+                }, (it: LinkItem, idx: number) => it.url + '_' + idx.toString() + '_' + this.panelMode)
+              }
+              .width('100%')
+              .layoutWeight(1)
+              .scrollBar(BarState.Off)
+            }
+          }
+          .width('100%')
+          .height('100%')
+          .padding(12)
+          .backgroundColor('#0B0F16')
+          .justifyContent(FlexAlign.Start)
         }
       }
       .width('100%')
