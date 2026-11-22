@@ -1,7 +1,7 @@
 # ohos-browser DEVLOG
 
 > 目的：记录设计、踩坑与状态，上下文压缩后可续接。
-> 路线图：`D:\ohos-device\docs\APP-ROADMAP.md` Phase 3
+> 路线图：`ohos-device/docs/APP-ROADMAP.md` Phase 3
 
 ## 2026-11-17 M0：工程空壳 + Web 验证
 
