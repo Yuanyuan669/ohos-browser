@@ -3,6 +3,8 @@ import preferences from '@ohos.data.preferences';
 import common from '@ohos.app.ability.common';
 import fs from '@ohos.file.fs';
 import fileUri from '@ohos.file.fileuri';
+import picker from '@ohos.file.picker';
+import { BusinessError } from '@ohos.base';
 import Want from '@ohos.app.ability.Want';
 import { Log } from '../common/Logger';
 
@@ -21,6 +23,27 @@ interface TitleEvent {
 interface ErrorEvent {
   request: WebResourceRequest;
   error: WebResourceError;
+}
+
+interface WindowNewEvent {
+  isAlert: boolean;
+  isUserTrigger: boolean;
+  targetUrl: string;
+  handler: ControllerHandler;
+}
+
+interface FileSelectorEvent {
+  result: FileSelectorResult;
+  fileSelector: FileSelectorParam;
+}
+
+interface SslErrorEvent {
+  handler: SslErrorHandler;
+  error: SslError;
+}
+
+interface LoadInterceptEvent {
+  data: WebResourceRequest;
 }
 
 interface TabInfo {
@@ -54,6 +77,9 @@ const UA_MOBILE: string = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/
   '(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 const UA_DESKTOP: string = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const IMAGE_EXTENSIONS: string[] = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.svgz', '.ico',
+  '.heic', '.heif', '.avif', '.apng', '.jfif', '.pjpeg', '.pjp', '.tif', '.tiff', '.xbm'];
+const VIDEO_EXTENSIONS: string[] = ['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.avi', '.3gp', '.3g2', '.ts', '.flv'];
 
 @Entry
 @Component
@@ -81,6 +107,11 @@ struct Index {
   @State panelMode: string = '';
   @State uaMode: string = 'mobile';
   @State showDebug: boolean = false;
+  @State darkMode: string = 'off';
+  @State allowMixed: boolean = false;
+  @State sslText: string = '';
+  private sslHandler: SslErrorHandler | null = null;
+  private uploadPending: boolean = false;
   private downloadDelegate: webview.WebDownloadDelegate = new webview.WebDownloadDelegate();
   private downloadItems: Map<string, webview.WebDownloadItem> = new Map();
   private downloadReady: boolean = false;
@@ -115,6 +146,10 @@ struct Index {
       this.uaMode = ua === 'desktop' ? 'desktop' : 'mobile';
       const dbg = await this.prefs.get('showDebug', false) as boolean;
       this.showDebug = dbg === true;
+      const dm = await this.prefs.get('darkMode', 'off') as string;
+      this.darkMode = dm === 'on' || dm === 'auto' ? dm : 'off';
+      const mix = await this.prefs.get('allowMixed', false) as boolean;
+      this.allowMixed = mix === true;
       this.applyUserAgent();
       const t = this.tabs[this.active];
       this.title = t.title;
@@ -189,6 +224,345 @@ struct Index {
   private setShowDebug(on: boolean): void {
     this.showDebug = on;
     this.savePref('showDebug', on);
+  }
+
+  private darkModeValue(): WebDarkMode {
+    if (this.darkMode === 'on') {
+      return WebDarkMode.On;
+    }
+    if (this.darkMode === 'auto') {
+      return WebDarkMode.Auto;
+    }
+    return WebDarkMode.Off;
+  }
+
+  private darkModeLabel(): string {
+    if (this.darkMode === 'on') {
+      return '开启';
+    }
+    if (this.darkMode === 'auto') {
+      return '跟随系统';
+    }
+    return '关闭';
+  }
+
+  private cycleDarkMode(): void {
+    if (this.darkMode === 'off') {
+      this.darkMode = 'auto';
+    } else if (this.darkMode === 'auto') {
+      this.darkMode = 'on';
+    } else {
+      this.darkMode = 'off';
+    }
+    this.savePref('darkMode', this.darkMode);
+    this.status = '网页深色：' + this.darkModeLabel();
+    Log.info('web dark mode ' + this.darkMode);
+  }
+
+  private mixedModeValue(): MixedMode {
+    return this.allowMixed ? MixedMode.Compatible : MixedMode.None;
+  }
+
+  private setAllowMixed(on: boolean): void {
+    this.allowMixed = on;
+    this.savePref('allowMixed', on);
+    this.status = on ? '允许 HTTPS 页面加载 HTTP 内容' : '禁止混合内容';
+  }
+
+  private clearBrowsingData(): void {
+    try {
+      this.controller.removeCache(true);
+    } catch (e) {
+      Log.warn('removeCache failed');
+    }
+    try {
+      webview.WebStorage.deleteAllData();
+    } catch (e) {
+      Log.warn('deleteAllData failed');
+    }
+    try {
+      webview.WebCookieManager.clearAllCookies().catch((e: Error) => {
+        Log.warn('clearAllCookies failed ' + e.message);
+      });
+    } catch (e) {
+      Log.warn('clearAllCookies call failed');
+    }
+    this.status = '已清除缓存、Cookie 与站点数据';
+    Log.info('browsing data cleared');
+  }
+
+  private isWebScheme(url: string): boolean {
+    const lower = url.toLowerCase();
+    return lower.indexOf('http://') === 0 ||
+      lower.indexOf('https://') === 0 ||
+      lower.indexOf('resource://') === 0 ||
+      lower.indexOf('file://') === 0 ||
+      lower.indexOf('about:') === 0 ||
+      lower.indexOf('data:') === 0 ||
+      lower.indexOf('blob:') === 0 ||
+      lower.indexOf('javascript:') === 0;
+  }
+
+  private blockForeignScheme(event?: LoadInterceptEvent): boolean {
+    if (event === undefined) {
+      return false;
+    }
+    try {
+      if (!event.data.isMainFrame()) {
+        return false;
+      }
+      const url = event.data.getRequestUrl();
+      if (url.length === 0 || this.isWebScheme(url)) {
+        return false;
+      }
+      this.status = '已拦截外部协议';
+      Log.warn('blocked scheme ' + url.substring(0, 80));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  private openNewWindow(event?: WindowNewEvent): void {
+    if (event === undefined) {
+      return;
+    }
+    const url = event.targetUrl;
+    Log.info('windowNew url=' + url + ' alert=' + event.isAlert);
+    if (url.length === 0) {
+      this.status = '已拦截空白弹窗';
+      return;
+    }
+    if (this.tabs.length >= MAX_TABS) {
+      this.address = url;
+      this.title = '新窗口';
+      this.load(url);
+      this.status = '新窗口已载入当前标签';
+    } else {
+      this.openInNewTab(url);
+      this.status = '新窗口已在新标签打开';
+    }
+  }
+
+  private openInNewTab(url: string): void {
+    this.persistCurrent();
+    this.tabs.push({ url: url, title: '新标签' });
+    this.active = this.tabs.length - 1;
+    this.address = url;
+    this.title = '新标签';
+    this.resetWeb(url);
+    this.saveSession();
+  }
+
+  private beginUpload(event?: FileSelectorEvent): boolean {
+    if (event === undefined) {
+      return false;
+    }
+    if (this.uploadPending) {
+      this.status = '已有文件选择窗口';
+      return true;
+    }
+    const multiple = event.fileSelector.getMode() === FileSelectorMode.FileOpenMultipleMode;
+    const accept = event.fileSelector.getAcceptType();
+    const result = event.result;
+    this.uploadPending = true;
+    this.status = '请选择要上传的文件';
+    Log.info('fileSelector accept=[' + accept.join(',') + '] mode=' + event.fileSelector.getMode());
+    try {
+      const media = this.isMediaAccept(accept);
+      if (media !== 0) {
+        const photoOptions: picker.PhotoSelectOptions = {
+          MIMEType: media === 1 ? picker.PhotoViewMIMETypes.VIDEO_TYPE : picker.PhotoViewMIMETypes.IMAGE_TYPE,
+          maxSelectNumber: multiple ? 8 : 1
+        };
+        const pv = new picker.PhotoViewPicker();
+        pv.select(photoOptions).then((res: picker.PhotoSelectResult) => {
+          this.uploadPending = false;
+          this.finishUpload(result, res.photoUris);
+        }).catch((e: Error) => {
+          this.uploadPending = false;
+          this.cancelUpload(result, e);
+        });
+      } else {
+        const options: picker.DocumentSelectOptions = {
+          maxSelectNumber: multiple ? 8 : 1
+        };
+        const dp = new picker.DocumentViewPicker();
+        dp.select(options).then((uris: string[]) => {
+          this.uploadPending = false;
+          this.finishUpload(result, uris);
+        }).catch((e: Error) => {
+          this.uploadPending = false;
+          this.cancelUpload(result, e);
+        });
+      }
+    } catch (e) {
+      this.uploadPending = false;
+      this.status = '无法打开文件选择器';
+      return false;
+    }
+    return true;
+  }
+
+  // nweb turns accept="image/*" into an extension list (".png,.jpg,..."), so match both.
+  // 0 = not media (use document picker), 1 = video, 2 = image.
+  private isMediaAccept(accept: string[]): number {
+    if (accept === undefined || accept.length === 0) {
+      return 0;
+    }
+    let image = false;
+    let video = false;
+    for (let i = 0; i < accept.length; i++) {
+      const a = accept[i].toLowerCase();
+      if (a.indexOf('image') >= 0) {
+        image = true;
+      } else if (a.indexOf('video') >= 0) {
+        video = true;
+      } else if (a.charAt(0) === '.') {
+        if (IMAGE_EXTENSIONS.indexOf(a) >= 0) {
+          image = true;
+        } else if (VIDEO_EXTENSIONS.indexOf(a) >= 0) {
+          video = true;
+        }
+      }
+    }
+    if (image) {
+      return 2;
+    }
+    return video ? 1 : 0;
+  }
+
+  private finishUpload(result: FileSelectorResult, uris: string[]): void {
+    try {
+      if (uris !== undefined && uris.length > 0) {
+        const local = this.localizeUploadUris(uris);
+        result.handleFileList(local);
+        this.status = '已选择 ' + uris.length + ' 个文件';
+        Log.info('upload files ' + uris.length);
+      } else {
+        result.handleFileList([]);
+        this.status = '未选择文件';
+      }
+    } catch (e) {
+      this.status = '上传选择结果失败';
+    }
+  }
+
+  private cancelUpload(result: FileSelectorResult, e: Error): void {
+    try {
+      result.handleFileList([]);
+    } catch (e2) {
+    }
+    this.status = '已取消上传';
+    Log.warn('upload picker cancelled ' + e.message);
+  }
+
+  private localizeUploadUris(uris: string[]): string[] {
+    const out: string[] = [];
+    let dir = '';
+    try {
+      const ctx = getContext(this) as common.UIAbilityContext;
+      dir = ctx.getApplicationContext().filesDir + '/upload';
+    } catch (e) {
+      const err = e as BusinessError;
+      Log.warn('upload dir unresolved code=' + err.code + ' msg=' + err.message);
+      return uris;
+    }
+    try {
+      fs.mkdirSync(dir, true);
+    } catch (e) {
+      // 13900015 = EEXIST: the cache dir is already there, keep going.
+      const err = e as BusinessError;
+      if (err.code !== 13900015) {
+        Log.warn('upload cache dir failed ' + dir + ' code=' + err.code + ' msg=' + err.message);
+        return uris;
+      }
+    }
+    for (let i = 0; i < uris.length; i++) {
+      const uri = uris[i];
+      // nweb can open media URIs directly, keep them (the app may only get a one-shot grant).
+      if (uri.indexOf('file://media/') === 0) {
+        out.push(uri);
+        Log.info('upload pass-through media uri=' + uri);
+        continue;
+      }
+      let name = uri.substring(uri.lastIndexOf('/') + 1);
+      const q = name.indexOf('?');
+      if (q >= 0) {
+        name = name.substring(0, q);
+      }
+      let safe = '';
+      for (let j = 0; j < name.length; j++) {
+        const ch = name.charAt(j);
+        if (ch === '/' || ch === '\\' || ch === ':' || ch === '*' || ch === '?' ||
+          ch === '"' || ch === '<' || ch === '>' || ch === '|' || ch.charCodeAt(0) < 32) {
+          safe += '_';
+        } else {
+          safe += ch;
+        }
+      }
+      if (safe.length === 0) {
+        safe = 'upload.bin';
+      }
+      const dest = dir + '/' + i.toString() + '_' + safe;
+      try {
+        const src = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+        fs.copyFileSync(src.fd, dest);
+        fs.closeSync(src);
+        const size = fs.statSync(dest).size;
+        const destUri = fileUri.getUriFromPath(dest);
+        out.push(dest);
+        Log.info('upload localized ' + safe + ' ' + size + ' bytes uri=' + destUri);
+      } catch (e) {
+        const err = e as BusinessError;
+        out.push(uri);
+        Log.warn('upload localize failed ' + safe + ' uri=' + uri + ' code=' + err.code + ' msg=' + err.message);
+      }
+    }
+    return out;
+  }
+
+  private sslErrorLabel(code: SslError): string {
+    if (code === SslError.HostMismatch) {
+      return '证书域名不匹配';
+    }
+    if (code === SslError.DateInvalid) {
+      return '证书未生效或已过期';
+    }
+    if (code === SslError.Untrusted) {
+      return '证书不受信任';
+    }
+    return '证书错误';
+  }
+
+  private onSslError(event?: SslErrorEvent): void {
+    if (event === undefined) {
+      return;
+    }
+    this.sslHandler = event.handler;
+    this.sslText = this.sslErrorLabel(event.error);
+    Log.warn('ssl error ' + event.error.toString());
+  }
+
+  private confirmSsl(accept: boolean): void {
+    const handler = this.sslHandler;
+    this.sslHandler = null;
+    this.sslText = '';
+    if (handler === null) {
+      return;
+    }
+    try {
+      if (accept) {
+        handler.handleConfirm();
+        this.status = '已继续访问（证书不受信任）';
+        Log.warn('ssl confirmed by user');
+      } else {
+        handler.handleCancel();
+        this.status = '已取消不受信任的证书';
+      }
+    } catch (e) {
+      Log.warn('ssl handler failed');
+    }
   }
 
   private initDownloadDelegate(): void {
@@ -978,8 +1352,10 @@ struct Index {
             .backgroundColor('#FFFFFF')
             .domStorageAccess(true)
             .fileAccess(false)
-            .darkMode(WebDarkMode.Off)
-            .forceDarkAccess(false)
+            .darkMode(this.darkModeValue())
+            .forceDarkAccess(this.darkMode !== 'off')
+            .mixedMode(this.mixedModeValue())
+            .multiWindowAccess(true)
             .onControllerAttached(() => {
               this.applyUserAgent();
               try {
@@ -1063,6 +1439,18 @@ struct Index {
                 this.errText = '页面加载失败';
               }
             })
+            .onShowFileSelector((event?: FileSelectorEvent) => {
+              return this.beginUpload(event);
+            })
+            .onWindowNew((event?: WindowNewEvent) => {
+              this.openNewWindow(event);
+            })
+            .onSslErrorEventReceive((event: SslErrorEvent) => {
+              this.onSslError(event);
+            })
+            .onLoadIntercept((event: LoadInterceptEvent) => {
+              return this.blockForeignScheme(event);
+            })
 
         }, (i: number) => i.toString() + '_' + this.webNonce)
 
@@ -1098,6 +1486,44 @@ struct Index {
           .backgroundColor('#151D29')
           .borderRadius(14)
           .border({ width: 1, color: '#2A3A52' })
+        }
+
+        if (this.sslText.length > 0) {
+          Column({ space: 12 }) {
+            Text('证书不受信任')
+              .fontSize(17)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#FFD166')
+            Text(this.sslText)
+              .fontSize(12)
+              .fontColor('#EAF1FB')
+              .textAlign(TextAlign.Center)
+            Text('继续访问会跳过证书校验，仅在你信任该站点时使用。')
+              .fontSize(11)
+              .fontColor('#8295AD')
+              .textAlign(TextAlign.Center)
+            Row({ space: 10 }) {
+              Button('取消')
+                .height(36)
+                .fontSize(13)
+                .backgroundColor('#243247')
+                .onClick(() => {
+                  this.confirmSsl(false);
+                })
+              Button('继续访问')
+                .height(36)
+                .fontSize(13)
+                .backgroundColor('#8A5A00')
+                .onClick(() => {
+                  this.confirmSsl(true);
+                })
+            }
+          }
+          .width('88%')
+          .padding(18)
+          .backgroundColor('#151D29')
+          .borderRadius(14)
+          .border({ width: 1, color: '#5A4315' })
         }
 
         if (this.panelMode.length > 0) {
@@ -1335,6 +1761,56 @@ struct Index {
               .layoutWeight(1)
               .scrollBar(BarState.Off)
             }
+
+            Row({ space: 8 }) {
+              Text('网页深色模式')
+                .fontSize(11)
+                .fontColor('#8295AD')
+                .layoutWeight(1)
+              Button(this.darkModeLabel())
+                .height(30)
+                .fontSize(11)
+                .padding({ left: 10, right: 10 })
+                .backgroundColor('#243247')
+                .fontColor('#DCE7F7')
+                .onClick(() => {
+                  this.cycleDarkMode();
+                })
+            }
+            .width('100%')
+            .height(32)
+
+            Row({ space: 8 }) {
+              Text('HTTPS 页面允许加载 HTTP 内容')
+                .fontSize(11)
+                .fontColor('#8295AD')
+                .layoutWeight(1)
+              Toggle({ type: ToggleType.Switch, isOn: this.allowMixed })
+                .selectedColor('#3D7BFF')
+                .onChange((on: boolean) => {
+                  this.setAllowMixed(on);
+                })
+            }
+            .width('100%')
+            .height(32)
+
+            Row({ space: 8 }) {
+              Text('缓存 / Cookie / 站点数据')
+                .fontSize(11)
+                .fontColor('#8295AD')
+                .layoutWeight(1)
+              Button('清除')
+                .height(30)
+                .fontSize(11)
+                .padding({ left: 10, right: 10 })
+                .backgroundColor('#2A1B1F')
+                .fontColor('#FF9C9C')
+                .onClick(() => {
+                  this.clearBrowsingData();
+                })
+            }
+            .width('100%')
+            .height(32)
 
             Row({ space: 8 }) {
               Text('显示页面信息与加载耗时')

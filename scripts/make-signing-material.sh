@@ -91,9 +91,16 @@ const p = JSON.parse(fs.readFileSync(src, 'utf8'));
 p['bundle-info']['bundle-name'] = bundle;
 p['bundle-info']['distribution-certificate'] = fs.readFileSync('app-leaf.pem', 'utf8');
 p['validity'] = { 'not-before': 1690000000, 'not-after': 2000000000 };
-p.acls = { 'allowed-acls': [] };
+// Optional privilege bump, e.g. OHOS_APP_APL=system_basic OHOS_ACLS=ohos.permission.FILE_ACCESS_PERSIST
+const apl = process.env.OHOS_APP_APL;
+if (apl && apl !== '') {
+  p['bundle-info']['apl'] = apl;
+}
+const acls = (process.env.OHOS_ACLS || '').split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+p.acls = { 'allowed-acls': acls };
 fs.writeFileSync('homekiosk-profile.json', JSON.stringify(p, null, 4));
-console.log('    bundle-name = ' + bundle + '  not-after = ' + new Date(p.validity['not-after'] * 1000).toISOString().slice(0, 10));
+console.log('    bundle-name = ' + bundle + '  apl = ' + (apl || 'normal') + '  acls = [' + acls.join(',') + ']');
+console.log('    not-after = ' + new Date(p.validity['not-after'] * 1000).toISOString().slice(0, 10));
 NODE
 
 step "5/5 签名 Profile -> homekiosk-profile.p7b"

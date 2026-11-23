@@ -128,3 +128,48 @@
 - **API 10 备选**：`Web.onDownloadStart` 取 url/userAgent/contentDisposition/mimetype/contentLength，交给
   `@ohos.request.downloadFile`（需 INTERNET，已有）。缺点：不带 Web 会话 cookie、无暂停/续传 UI 集成。
 - 待确认：下载目录（delegate 默认路径 + `getFullPath` 导出）、`blob:/data:` 链接不支持、断点续传服务器要求。
+
+
+## 2026-11-23 M5：上传 / window.open / SSL 二次确认 / 深色模式
+
+- 上传（`onFileSelectorShow` + `FileSelectorResult.handleFileList`）：
+  - nweb 把 `accept="image/*"` 展开成扩展名列表（`.png,.jpg,...`），按 MIME 前缀和扩展名一起判断；图片/视频走 `PhotoViewPicker`，其余走 `DocumentViewPicker`；支持多选（最多 8）。
+  - 媒体 URI（`file://media/Photo/...`）直接交给 nweb（一次授权，实测可读）。
+  - 文档 URI 复制到 `filesDir/upload/<序号>_<安全文件名>`，交给 nweb **绝对沙盒路径**（nweb 读 `file://com.local.browser/...` 形式会得到 0 B，勿用该形式）。
+  - `mkdirSync` 的 `13900015`（EEXIST）视为成功；复制失败回退原 URI 并记日志。
+- `window.open`：`onWindowNew` 拦截；空白弹窗提示拦截；有 URL 时 3 标签内新标签打开，超限则当前标签载入。
+- SSL：`onSslErrorEventReceive` 暂停并弹覆盖层（错误码 + 继续/取消）；确认后 `handler.handleSslError(...CONFIRM)` 继续加载，取消则 `CANCEL`。
+- 深色：面板三档 `关闭 / 跟随系统 / 开启`（`WebDarkMode.Off/Auto/On` + `forceDarkAccess`），`darkMode` 持久化。
+- 外部协议：`onLoadIntercept` 主框架拦截非 web scheme（`weixin://`、`mailto:`、`baiduboxapp://` 等），状态栏提示“已拦截外部协议”。
+- 测试页 `rawfile/devtest.html`：图片上传、通用文件上传、`window.open`、外部协议、badssl 四链接；主页加入口。
+- 真机实测（LHT16 / OH 4.1.7.5，API 11）：
+  - 图片上传：`OhScreen_1795334801749.png`（557,819 bytes）→ 页面回显 `image/png`，前 160 字节 PNG 头可读，字节完整。
+  - `window.open`：日志 `windowNew url=resource://rawfile/devtest.html?child=1`，新标签载入正常。
+  - 外部协议：`blocked scheme weixin://dl/business`、`mailto:` 均被拦截。
+  - SSL：`self-signed.badssl.com` 弹层 → “继续访问” → `ssl error 3` → `ssl confirmed by user` → `pageEnd 236ms`；`expired.badssl.com`（`ssl error 2`）同样可继续。
+  - 深色：三档日志 `web dark mode auto/on/off`；`开启` 时 example.com 白底反转为深底浅字，`关闭` 恢复白底。
+- 已知限制（平台）：
+  - `DocumentViewPicker` 返回的 `file://docs/...` 在本镜像上普通应用读不了（`13900001`；nweb `MediaLibrary Extension:{OpenFile} Permission Denied err=-13`），通用文件上传只能“尽力传原 URI”，本机必然 0 B。
+  - `fileShare.persistPermission` 返回 `801 The device doesn't support this api`；提权无收益，已回退 `apl: normal` / `allowed-acls: []`，`module.json5` 只保留 `INTERNET` + `GET_NETWORK_INFO`。
+
+## 2026-11-23 M6：混合内容 / 清数据 / release 验收
+
+- 混合内容：`mixedMode(allowMixed ? MixedMode.Compatible : MixedMode.None)`，面板 Toggle 持久化 `allowMixed`。
+  - `https://mixed.badssl.com/`：**开** → 页面中部 HTTP 图片正常显示；**关** → 同位置破图 + “HTTP image” alt 文案。截图 `build-artifacts/mix-on.jpeg` / `mix-off.jpeg`。
+- 清数据：`removeCache(true)` + `WebStorage.deleteAllData()` + `WebCookieManager.clearAllCookies()`；日志 `browsing data cleared`；面板书签/历史条数不变（书签 0 / 历史 4），preferences 未被误删。
+- 站点抽样（release 包，手机 UA）：
+  - `example.com` 冷加载 1171ms；深色开/关对比正常。
+  - `cn.bing.com` 361ms，首页完整（横幅、搜索框、资讯流）。
+  - `www.baidu.com` 724~1003ms，完整；站内 `baiduboxapp://` 被拦截。
+  - `music.163.com` 604~705ms，移动版结构/文字正常（封面图为懒加载占位）。
+  - `github.com` 无代理时 10s 内未完成（设备直连不可达），停留在上一页；属网络环境限制，无崩溃。
+- 内存（单标签 `music.163.com`，`hidumper --mem`）：应用进程 PSS 112,182 kB + 渲染进程 PSS 103,046 kB = **215,228 kB ≈ 210 MiB**，满足 M6 “单标签 RSS ≤300 MiB”。
+- release 构建与安装：
+  - `bash scripts/build.sh --release` → unsigned **1,020,310 bytes**；`bash scripts/sign.sh` → signed **1,025,842 bytes**。
+  - 覆盖安装报 `9568336 install debug type not same`（debug → release），按预期卸载重装；`bm dump` 显示 `"debug": false`；冷启动首页 `pageEnd 39ms`，无崩溃日志。
+  - 卸载重装会清空沙盒，本次验收时已无书签/历史（此前仅测试数据）。
+- 脚本修正：
+  - `deploy.sh` 原只看 hdc 退出码，hdc 在 `msg:error:` 时仍返回 0，覆盖安装失败会被误报成功；现解析输出中的 `msg:error:`，失败才卸载重装。
+  - `make-signing-material.sh` 支持可选 `OHOS_APP_APL` / `OHOS_ACLS`（默认 `normal` / 空），本次未启用提权。
+- 产物：`build-artifacts/`（`entry-signed.hap`、`entry-unsigned.hap`、`mix-on/off.jpeg`、`dark-on/off.jpeg`、`clear1/2.jpeg`、`site-*.jpeg`）。
+- 结论：M5/M6 功能项全部实机通过；剩余限制为文档 URI 权限与 `persistPermission 801`（平台侧），以及无代理环境下 GitHub 不可达。

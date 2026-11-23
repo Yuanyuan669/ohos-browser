@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M5 交互测试</title>
+<style>
+body{margin:0;padding:20px 16px;background:#0b0f16;color:#e8f0fb;font-family:sans-serif}
+h2{font-size:18px;margin:0 0 14px}
+.card{background:#151d29;border-radius:10px;padding:14px;margin:12px 0}
+input[type=file]{color:#e8f0fb;font-size:13px}
+button{display:block;width:100%;padding:12px;margin:8px 0;background:#1a2331;color:#8fb8ff;border:0;border-radius:9px;font-size:14px}
+a{display:block;padding:12px;margin:8px 0;background:#1a2331;color:#8fb8ff;text-align:center;border-radius:9px;text-decoration:none}
+#out{font-size:12px;color:#9fb2cc;word-break:break-all;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<h2>M5 交互测试</h2>
+<div class="card">
+  <p>1. 文件上传（多选）</p>
+  <input type="file" id="f" multiple>
+  <div id="out">尚未选择文件</div>
+</div>
+<div class="card">
+  <p>1b. 图片上传（走相册选择器）</p>
+  <input type="file" id="fi" accept="image/*">
+  <div id="outi" style="font-size:12px;color:#9fb2cc;word-break:break-all;white-space:pre-wrap">尚未选择图片</div>
+</div>
+<div class="card">
+  <p>2. window.open</p>
+  <button onclick="var w=window.open('devtest.html?child=1','_blank','width=420,height=320');document.getElementById('wo').textContent='window.open 返回: '+(w?'窗口对象':'null')">window.open 新窗口</button>
+  <div id="wo" style="font-size:12px;color:#9fb2cc">未测试</div>
+</div>
+<div class="card">
+  <p>3. 外部 scheme（应被浏览器拦截）</p>
+  <a href="weixin://dl/business">weixin:// 链接</a>
+  <a href="mailto:test@example.com">mailto: 链接</a>
+</div>
+<div class="card">
+  <p>4. SSL / 混合内容（badssl）</p>
+  <a href="https://self-signed.badssl.com/">自签证书页（应弹确认）</a>
+  <a href="https://wrong.host.badssl.com/">域名不匹配页</a>
+  <a href="https://expired.badssl.com/">过期证书页</a>
+  <a href="https://mixed.badssl.com/">混合内容页（http 图片）</a>
+</div>
+<script>
+var f = document.getElementById('f');
+function report(label, files, out) {
+  if (!files || files.length === 0) { out.textContent = '未选择文件'; return; }
+  var lines = ['已选 ' + files.length + ' 个文件'];
+  for (var i = 0; i < files.length; i++) {
+    var file = files[i];
+    lines.push('· ' + file.name + ' · ' + file.size + ' B · ' + (file.type || '未知类型'));
+  }
+  out.textContent = lines.join('\n');
+  var first = files[0];
+  if (first && first.size > 0) {
+    first.slice(0, 160).text().then(function (t) {
+      out.textContent = lines.join('\n') + '\n首 160 字节: ' + JSON.stringify(t);
+    }).catch(function (e) {
+      out.textContent = lines.join('\n') + '\n读取内容失败: ' + e;
+    });
+  }
+}
+f.onchange = function () {
+  report('file', f.files, document.getElementById('out'));
+};
+var fi = document.getElementById('fi');
+fi.onchange = function () {
+  report('image', fi.files, document.getElementById('outi'));
+};
+</script>
+</body>
+</html>
